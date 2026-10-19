@@ -1,4 +1,5 @@
-name: CodeGuardian AI Tests
+
+name: CodeGuardian AI Quality Checks
 
 on:
   push:
@@ -7,7 +8,7 @@ on:
     branches: [main]
 
 jobs:
-  test:
+  quality-checks:
     runs-on: ubuntu-latest
 
     steps:
@@ -26,4 +27,11 @@ jobs:
 
       - name: Run automated tests
         run: python -m pytest backend/tests/ -v
+
+      - name: Check code quality with Ruff
+        run: python -m ruff check backend/
+
+      - name: Scan application with Bandit
+        run: python -m bandit -r backend/app/
+
         
