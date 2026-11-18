@@ -6,6 +6,12 @@ import uuid
 DOCKER_IMAGE = "codeguardian-runner:dev"
 EXECUTION_TIMEOUT = 5
 CLEANUP_TIMEOUT = 10
+MAX_OUTPUT_LENGTH = 10_000
+
+
+def limit_output(text: str) -> str:
+    """Limit the amount of output returned to the caller."""
+    return text[:MAX_OUTPUT_LENGTH]
 
 
 def run_python_code(code: str) -> dict:
@@ -65,8 +71,8 @@ def run_python_code(code: str) -> dict:
 
         output = {
             "status": "completed",
-            "stdout": result.stdout,
-            "stderr": result.stderr,
+            "stdout": limit_output(result.stdout),
+            "stderr": limit_output(result.stderr),
             "exit_code": result.returncode,
         }
 

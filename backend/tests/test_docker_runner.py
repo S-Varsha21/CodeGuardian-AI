@@ -12,7 +12,6 @@ def test_docker_runner_executes_code_successfully():
         stdout="30\n",
         stderr="",
     )
-
     cleanup_result = subprocess.CompletedProcess(
         args=["docker", "rm"],
         returncode=0,
@@ -116,7 +115,6 @@ def test_docker_runner_reports_cleanup_failure():
         stdout="Hello\n",
         stderr="",
     )
-
     cleanup_result = subprocess.CompletedProcess(
         args=["docker", "rm"],
         returncode=1,
@@ -140,3 +138,34 @@ def test_docker_runner_reports_cleanup_failure():
     assert result["cleanup_warning"] == (
         "Container cleanup could not be confirmed."
     )
+
+
+def test_docker_runner_limits_output_size():
+    large_output = "A" * 100_000
+
+    execution_result = subprocess.CompletedProcess(
+        args=["docker", "run"],
+        returncode=0,
+        stdout=large_output,
+        stderr="",
+    )
+    cleanup_result = subprocess.CompletedProcess(
+        args=["docker", "rm"],
+        returncode=0,
+        stdout="",
+        stderr="",
+    )
+
+    with (
+        patch(
+            "backend.app.docker_runner.shutil.which",
+            return_value="/usr/local/bin/docker",
+        ),
+        patch(
+            "backend.app.docker_runner.subprocess.run",
+            side_effect=[execution_result, cleanup_result],
+        ),
+    ):
+        result = run_python_code("print('A' * 100000)")
+
+    assert len(result["stdout"]) <= 10_000
