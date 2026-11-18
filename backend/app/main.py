@@ -1,17 +1,20 @@
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
+
+from backend.app.docker_runner import run_python_code
 
 app = FastAPI(
     title="CodeGuardian AI",
     description="AI-powered software testing and code security analysis.",
-    version="0.2.0",
+    version="0.3.0",
 )
 
 
@@ -20,6 +23,14 @@ class CodeAnalysisRequest(BaseModel):
         ...,
         max_length=100_000,
         description="Python source code to analyze.",
+    )
+
+
+class CodeExecutionRequest(BaseModel):
+    code: str = Field(
+        ...,
+        max_length=10_000,
+        description="Trusted Python code for local development testing.",
     )
 
 
@@ -149,3 +160,14 @@ def analyze_code(request: CodeAnalysisRequest):
         "security_scan_error": security_scan_error,
     }
 
+
+@app.post("/execute", include_in_schema=False)
+def execute_code(request: CodeExecutionRequest):
+    """Run trusted development code only when explicitly enabled."""
+    if os.getenv("CODEGUARDIAN_ENABLE_EXECUTION") != "true":
+        raise HTTPException(
+            status_code=403,
+            detail="Code execution is disabled.",
+        )
+
+    return run_python_code(request.code)
