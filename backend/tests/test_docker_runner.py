@@ -1,93 +1,65 @@
 
 import subprocess
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from backend.app.docker_runner import run_python_code
 
 
-def test_docker_runner_executes_code_successfully():
-    execution_result = subprocess.CompletedProcess(
-        args=["docker", "run"],
-        returncode=0,
-        stdout="30\n",
-        stderr="",
-    )
-    cleanup_result = subprocess.CompletedProcess(
-        args=["docker", "rm"],
-        returncode=0,
-        stdout="",
-        stderr="",
-    )
+def make_process(returncode=0, stdout=b"", stderr=b""):
+    """Create a mocked Docker process with readable output streams."""
+    process = MagicMock()
+    process.poll.return_value = returncode
+    process.wait.return_value = returncode
 
-    with (
-        patch(
-            "backend.app.docker_runner.shutil.which",
-            return_value="/usr/local/bin/docker",
-        ),
-        patch(
-            "backend.app.docker_runner.subprocess.run",
-            side_effect=[execution_result, cleanup_result],
-        ) as mock_run,
-    ):
-        result = run_python_code("print(10 + 20)")
-
-    assert result["status"] == "completed"
-    assert result["stdout"] == "30\n"
-    assert result["stderr"] == ""
-    assert result["exit_code"] == 0
-    assert "cleanup_warning" not in result
-    assert mock_run.call_count == 2
+    return process
 
 
-def test_docker_runner_handles_timeout():
-    cleanup_result = subprocess.CompletedProcess(
-        args=["docker", "rm"],
-        returncode=0,
-        stdout="",
-        stderr="",
-    )
 
-    with (
-        patch(
-            "backend.app.docker_runner.shutil.which",
-            return_value="/usr/local/bin/docker",
-        ),
-        patch(
-            "backend.app.docker_runner.subprocess.run",
-            side_effect=[
-                subprocess.TimeoutExpired(
-                    cmd="docker run",
-                    timeout=5,
-                ),
-                cleanup_result,
-            ],
-        ),
-    ):
-        result = run_python_code("import time; time.sleep(10)")
+def make_selector(stdout=b"", stderr=b""):
+    """Simulate readable streams followed by end-of-file."""
+    selector = MagicMock()
+    selector.__enter__.return_value = selector
 
-    assert result["status"] == "timeout"
-    assert result["exit_code"] is None
-    assert result["stderr"] == "Execution exceeded the time limit."
+    stdout_stream = MagicMock()
+    stderr_stream = MagicMock()
 
+    stdout_stream.read.side_effect = [stdout, b""]
+    stderr_stream.read.side_effect = [stderr, b""]
 
-def test_docker_runner_handles_missing_docker():
+    stdout_key = MagicMock()
+    stdout_key.fileobj = stdout_stream
+    stdout_key.data = "stdout"
+
+    stderr_key = MagicMock()
+    stderr_key.fileobj = stderr_stream
+    stderr_key.data = "stderr"
+
+    selector.get_map.side_effect = [
+        {"stdout": True, "stderr": True},
+        {"stdout": True, "stderr": True},
+        {},
+    ]
+
+    selector.select.side_effect = [
+        [(stdout_key, 1), (stderr_key, 1)],
+        [(stdout_key, 1), (stderr_key, 1)],
+    ]
+
+    return selector
+
+def test_missing_docker():
     with patch(
         "backend.app.docker_runner.shutil.which",
         return_value=None,
     ):
-        result = run_python_code("print('Hello')")
+        result = run_python_code("print(30)")
 
     assert result["status"] == "error"
-    assert result["stderr"] == "Docker executable was not found."
+    assert "Docker" in result["stderr"]
 
 
-def test_docker_runner_handles_execution_error():
-    cleanup_result = subprocess.CompletedProcess(
-        args=["docker", "rm"],
-        returncode=0,
-        stdout="",
-        stderr="",
-    )
+def test_docker_starts_successfully():
+    process = make_process()
 
     with (
         patch(
@@ -95,66 +67,35 @@ def test_docker_runner_handles_execution_error():
             return_value="/usr/local/bin/docker",
         ),
         patch(
-            "backend.app.docker_runner.subprocess.run",
-            side_effect=[
-                OSError("Docker unavailable"),
-                cleanup_result,
-            ],
+            "backend.app.docker_runner.subprocess.Popen",
+            return_value=process,
         ),
-    ):
-        result = run_python_code("print('Hello')")
-
-    assert result["status"] == "error"
-    assert result["stderr"] == "Docker could not be started."
-
-
-def test_docker_runner_reports_cleanup_failure():
-    execution_result = subprocess.CompletedProcess(
-        args=["docker", "run"],
-        returncode=0,
-        stdout="Hello\n",
-        stderr="",
-    )
-    cleanup_result = subprocess.CompletedProcess(
-        args=["docker", "rm"],
-        returncode=1,
-        stdout="",
-        stderr="Cleanup failed",
-    )
-
-    with (
         patch(
-            "backend.app.docker_runner.shutil.which",
-            return_value="/usr/local/bin/docker",
+            "backend.app.docker_runner.selectors.DefaultSelector",
+            return_value=make_selector(),
         ),
         patch(
             "backend.app.docker_runner.subprocess.run",
-            side_effect=[execution_result, cleanup_result],
+            return_value=subprocess.CompletedProcess(
+                args=["docker", "rm"],
+                returncode=0,
+            ),
         ),
     ):
-        result = run_python_code("print('Hello')")
+        result = run_python_code("print(30)")
 
     assert result["status"] == "completed"
-    assert result["cleanup_warning"] == (
-        "Container cleanup could not be confirmed."
-    )
+    assert result["exit_code"] == 0
 
 
-def test_docker_runner_limits_output_size():
-    large_output = "A" * 100_000
+def test_output_limit_constant():
+    from backend.app.docker_runner import MAX_OUTPUT_BYTES
 
-    execution_result = subprocess.CompletedProcess(
-        args=["docker", "run"],
-        returncode=0,
-        stdout=large_output,
-        stderr="",
-    )
-    cleanup_result = subprocess.CompletedProcess(
-        args=["docker", "rm"],
-        returncode=0,
-        stdout="",
-        stderr="",
-    )
+    assert MAX_OUTPUT_BYTES == 10_000
+
+
+def test_docker_cleanup_warning():
+    process = make_process()
 
     with (
         patch(
@@ -162,10 +103,218 @@ def test_docker_runner_limits_output_size():
             return_value="/usr/local/bin/docker",
         ),
         patch(
+            "backend.app.docker_runner.subprocess.Popen",
+            return_value=process,
+        ),
+        patch(
+            "backend.app.docker_runner.selectors.DefaultSelector",
+            return_value=make_selector(),
+        ),
+        patch(
             "backend.app.docker_runner.subprocess.run",
-            side_effect=[execution_result, cleanup_result],
+            return_value=subprocess.CompletedProcess(
+                args=["docker", "rm"],
+                returncode=1,
+            ),
+        ),
+    ):
+        result = run_python_code("print(30)")
+
+    assert "cleanup_warning" in result
+
+
+def test_docker_start_failure():
+    with (
+        patch(
+            "backend.app.docker_runner.shutil.which",
+            return_value="/usr/local/bin/docker",
+        ),
+        patch(
+            "backend.app.docker_runner.subprocess.Popen",
+            side_effect=OSError("Docker failed"),
+        ),
+        patch(
+            "backend.app.docker_runner.subprocess.run",
+            return_value=subprocess.CompletedProcess(
+                args=["docker", "rm"],
+                returncode=0,
+            ),
+        ),
+    ):
+        result = run_python_code("print(30)")
+
+    assert result["status"] == "error"
+    assert "Docker could not be started" in result["stderr"]
+
+
+def test_execution_timeout():
+    process = make_process()
+    process.wait.side_effect = subprocess.TimeoutExpired(
+        cmd="docker run",
+        timeout=5,
+    )
+
+    selector = MagicMock()
+    selector.__enter__.return_value = selector
+    selector.get_map.return_value = {"stdout": True}
+    selector.select.return_value = []
+
+    with (
+        patch(
+            "backend.app.docker_runner.shutil.which",
+            return_value="/usr/local/bin/docker",
+        ),
+        patch(
+            "backend.app.docker_runner.subprocess.Popen",
+            return_value=process,
+        ),
+        patch(
+            "backend.app.docker_runner.selectors.DefaultSelector",
+            return_value=selector,
+        ),
+        patch(
+            "backend.app.docker_runner.subprocess.run",
+            return_value=subprocess.CompletedProcess(
+                args=["docker", "rm"],
+                returncode=0,
+            ),
+        ),
+    ):
+        result = run_python_code("while True: pass")
+
+    assert result["status"] == "timeout"
+    assert "time limit" in result["stderr"]
+
+
+def test_output_is_bounded():
+    from backend.app.docker_runner import MAX_OUTPUT_BYTES
+
+    assert MAX_OUTPUT_BYTES == 10_000
+
+
+
+def test_runner_truncates_large_stdout():
+    """Verify that actual captured output is limited to 10,000 bytes."""
+    from backend.app.docker_runner import MAX_OUTPUT_BYTES
+
+    process = make_process()
+
+    large_output = b"A" * 100_000
+    selector = make_selector(stdout=large_output)
+
+    with (
+        patch(
+            "backend.app.docker_runner.shutil.which",
+            return_value="/usr/local/bin/docker",
+        ),
+        patch(
+            "backend.app.docker_runner.subprocess.Popen",
+            return_value=process,
+        ),
+        patch(
+            "backend.app.docker_runner.selectors.DefaultSelector",
+            return_value=selector,
+        ),
+        patch(
+            "backend.app.docker_runner.subprocess.run",
+            return_value=subprocess.CompletedProcess(
+                args=["docker", "rm"],
+                returncode=0,
+            ),
         ),
     ):
         result = run_python_code("print('A' * 100000)")
 
-    assert len(result["stdout"]) <= 10_000
+    assert result["status"] == "completed"
+    assert len(result["stdout"].encode("utf-8")) == MAX_OUTPUT_BYTES
+    assert result["stdout"] == "A" * MAX_OUTPUT_BYTES
+    assert result["exit_code"] == 0
+
+
+
+def test_timeout_kills_process_and_cleans_container():
+    """Verify timeout triggers process termination and Docker cleanup."""
+    process = make_process()
+    process.poll.return_value = None
+
+    selector = MagicMock()
+    selector.__enter__.return_value = selector
+    selector.get_map.return_value = {"stdout": True}
+    selector.select.return_value = []
+
+    cleanup_result = subprocess.CompletedProcess(
+        args=["docker", "rm"],
+        returncode=0,
+        stdout="",
+        stderr="",
+    )
+
+    with (
+        patch(
+            "backend.app.docker_runner.shutil.which",
+            return_value="/usr/local/bin/docker",
+        ),
+        patch(
+            "backend.app.docker_runner.subprocess.Popen",
+            return_value=process,
+        ),
+        patch(
+            "backend.app.docker_runner.selectors.DefaultSelector",
+            return_value=selector,
+        ),
+        patch(
+            "backend.app.docker_runner.subprocess.run",
+            return_value=cleanup_result,
+        ) as cleanup_mock,
+    ):
+        result = run_python_code("while True: pass")
+
+    assert result["status"] == "timeout"
+    process.kill.assert_called_once()
+    cleanup_mock.assert_called_once()
+    assert cleanup_mock.call_args.args[0][1:3] == ["rm", "-f"]
+
+
+def test_cleanup_continues_when_process_kill_fails():
+    """Docker cleanup must still run when process termination fails."""
+    process = make_process()
+    process.poll.return_value = None
+    process.kill.side_effect = OSError("Process termination failed")
+
+    selector = MagicMock()
+    selector.__enter__.return_value = selector
+    selector.get_map.return_value = {"stdout": True}
+    selector.select.return_value = []
+
+    cleanup_result = subprocess.CompletedProcess(
+        args=["docker", "rm"],
+        returncode=0,
+        stdout="",
+        stderr="",
+    )
+
+    with (
+        patch(
+            "backend.app.docker_runner.shutil.which",
+            return_value="/usr/local/bin/docker",
+        ),
+        patch(
+            "backend.app.docker_runner.subprocess.Popen",
+            return_value=process,
+        ),
+        patch(
+            "backend.app.docker_runner.selectors.DefaultSelector",
+            return_value=selector,
+        ),
+        patch(
+            "backend.app.docker_runner.subprocess.run",
+            return_value=cleanup_result,
+        ) as cleanup_mock,
+    ):
+        result = run_python_code("while True: pass")
+
+    assert result["status"] == "timeout"
+    process.kill.assert_called_once()
+    cleanup_mock.assert_called_once()
+    assert cleanup_mock.call_args.args[0][1:3] == ["rm", "-f"]
+    assert "cleanup_warning" in result

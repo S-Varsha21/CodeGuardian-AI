@@ -1,17 +1,14 @@
 
+import selectors
 import shutil
 import subprocess
+import time
 import uuid
 
 DOCKER_IMAGE = "codeguardian-runner:dev"
 EXECUTION_TIMEOUT = 5
 CLEANUP_TIMEOUT = 10
-MAX_OUTPUT_LENGTH = 10_000
-
-
-def limit_output(text: str) -> str:
-    """Limit the amount of output returned to the caller."""
-    return text[:MAX_OUTPUT_LENGTH]
+MAX_OUTPUT_BYTES = 10_000
 
 
 def run_python_code(code: str) -> dict:
@@ -60,33 +57,134 @@ def run_python_code(code: str) -> dict:
         "exit_code": None,
     }
 
+    process = None
+    stdout_buffer = bytearray()
+    stderr_buffer = bytearray()
+    deadline = time.monotonic() + EXECUTION_TIMEOUT
+
     try:
-        result = subprocess.run(
+        process = subprocess.Popen(
             command,
-            capture_output=True,
-            text=True,
-            timeout=EXECUTION_TIMEOUT,
-            check=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            bufsize=0,
         )
 
-        output = {
-            "status": "completed",
-            "stdout": limit_output(result.stdout),
-            "stderr": limit_output(result.stderr),
-            "exit_code": result.returncode,
-        }
+        with selectors.DefaultSelector() as selector:
+            selector.register(
+                process.stdout,
+                selectors.EVENT_READ,
+                "stdout",
+            )
+            selector.register(
+                process.stderr,
+                selectors.EVENT_READ,
+                "stderr",
+            )
 
-    except subprocess.TimeoutExpired:
-        output["status"] = "timeout"
-        output["stderr"] = "Execution exceeded the time limit."
+            while selector.get_map():
+                remaining = deadline - time.monotonic()
+
+                if remaining <= 0:
+                    output["status"] = "timeout"
+                    output["stderr"] = (
+                        "Execution exceeded the time limit."
+                    )
+                    break
+
+                events = selector.select(timeout=remaining)
+
+                if not events:
+                    output["status"] = "timeout"
+                    output["stderr"] = (
+                        "Execution exceeded the time limit."
+                    )
+                    break
+
+                for key, _ in events:
+                    chunk = key.fileobj.read(4096)
+
+                    if not chunk:
+                        selector.unregister(key.fileobj)
+                        continue
+
+                    buffer = (
+                        stdout_buffer
+                        if key.data == "stdout"
+                        else stderr_buffer
+                    )
+
+                    space = MAX_OUTPUT_BYTES - len(buffer)
+
+                    if space > 0:
+                        buffer.extend(chunk[:space])
+
+        if output["status"] != "timeout":
+            remaining = max(
+                0,
+                deadline - time.monotonic(),
+            )
+
+            try:
+                exit_code = process.wait(timeout=remaining)
+
+                output = {
+                    "status": "completed",
+                    "stdout": stdout_buffer.decode(
+                        "utf-8",
+                        errors="replace",
+                    ),
+                    "stderr": stderr_buffer.decode(
+                        "utf-8",
+                        errors="replace",
+                    ),
+                    "exit_code": exit_code,
+                }
+
+            except subprocess.TimeoutExpired:
+                output["status"] = "timeout"
+                output["stderr"] = (
+                    "Execution exceeded the time limit."
+                )
 
     except OSError:
         output["stderr"] = "Docker could not be started."
 
     finally:
+        if process is not None:
+            try:
+                if process.poll() is None:
+                    process.kill()
+
+                process.wait(timeout=CLEANUP_TIMEOUT)
+
+            except (OSError, subprocess.TimeoutExpired):
+                output["cleanup_warning"] = (
+                    "Docker process termination could not be confirmed."
+                )
+
+            finally:
+                for stream in (
+                    process.stdout,
+                    process.stderr,
+                ):
+                    if stream is not None:
+                        try:
+                            stream.close()
+                        except OSError:
+                            output["cleanup_warning"] = (
+                                "Docker process stream cleanup failed."
+                            )
+
         try:
             cleanup = subprocess.run(
-                [docker_path, "rm", "-f", container_name],
+                [
+                    docker_path,
+                    "rm",
+                    "-f",
+                    container_name,
+                ],
                 capture_output=True,
                 text=True,
                 timeout=CLEANUP_TIMEOUT,
@@ -104,3 +202,4 @@ def run_python_code(code: str) -> dict:
             )
 
     return output
+
