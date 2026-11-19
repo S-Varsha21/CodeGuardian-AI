@@ -275,4 +275,46 @@ def test_timeout_kills_process_and_cleans_container():
     assert cleanup_mock.call_args.args[0][1:3] == ["rm", "-f"]
 
 
+def test_cleanup_continues_when_process_kill_fails():
+    """Docker cleanup must still run when process termination fails."""
+    process = make_process()
+    process.poll.return_value = None
+    process.kill.side_effect = OSError("Process termination failed")
 
+    selector = MagicMock()
+    selector.__enter__.return_value = selector
+    selector.get_map.return_value = {"stdout": True}
+    selector.select.return_value = []
+
+    cleanup_result = subprocess.CompletedProcess(
+        args=["docker", "rm"],
+        returncode=0,
+        stdout="",
+        stderr="",
+    )
+
+    with (
+        patch(
+            "backend.app.docker_runner.shutil.which",
+            return_value="/usr/local/bin/docker",
+        ),
+        patch(
+            "backend.app.docker_runner.subprocess.Popen",
+            return_value=process,
+        ),
+        patch(
+            "backend.app.docker_runner.selectors.DefaultSelector",
+            return_value=selector,
+        ),
+        patch(
+            "backend.app.docker_runner.subprocess.run",
+            return_value=cleanup_result,
+        ) as cleanup_mock,
+    ):
+        result = run_python_code("while True: pass")
+
+    assert result["status"] == "timeout"
+    process.kill.assert_called_once()
+    cleanup_mock.assert_called_once()
+    assert cleanup_mock.call_args.args[0][1:3] == ["rm", "-f"]
+    assert "cleanup_warning" in result

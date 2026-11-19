@@ -72,22 +72,34 @@ def run_python_code(code: str) -> dict:
         )
 
         with selectors.DefaultSelector() as selector:
-            selector.register(process.stdout, selectors.EVENT_READ, "stdout")
-            selector.register(process.stderr, selectors.EVENT_READ, "stderr")
+            selector.register(
+                process.stdout,
+                selectors.EVENT_READ,
+                "stdout",
+            )
+            selector.register(
+                process.stderr,
+                selectors.EVENT_READ,
+                "stderr",
+            )
 
             while selector.get_map():
                 remaining = deadline - time.monotonic()
 
                 if remaining <= 0:
                     output["status"] = "timeout"
-                    output["stderr"] = "Execution exceeded the time limit."
+                    output["stderr"] = (
+                        "Execution exceeded the time limit."
+                    )
                     break
 
                 events = selector.select(timeout=remaining)
 
                 if not events:
                     output["status"] = "timeout"
-                    output["stderr"] = "Execution exceeded the time limit."
+                    output["stderr"] = (
+                        "Execution exceeded the time limit."
+                    )
                     break
 
                 for key, _ in events:
@@ -109,48 +121,70 @@ def run_python_code(code: str) -> dict:
                         buffer.extend(chunk[:space])
 
         if output["status"] != "timeout":
-            remaining = max(0, deadline - time.monotonic())
+            remaining = max(
+                0,
+                deadline - time.monotonic(),
+            )
 
             try:
                 exit_code = process.wait(timeout=remaining)
+
                 output = {
                     "status": "completed",
                     "stdout": stdout_buffer.decode(
-                        "utf-8", errors="replace"
+                        "utf-8",
+                        errors="replace",
                     ),
                     "stderr": stderr_buffer.decode(
-                        "utf-8", errors="replace"
+                        "utf-8",
+                        errors="replace",
                     ),
                     "exit_code": exit_code,
                 }
+
             except subprocess.TimeoutExpired:
                 output["status"] = "timeout"
-                output["stderr"] = "Execution exceeded the time limit."
+                output["stderr"] = (
+                    "Execution exceeded the time limit."
+                )
 
     except OSError:
         output["stderr"] = "Docker could not be started."
 
     finally:
         if process is not None:
-            if process.poll() is None:
-                process.kill()
-
             try:
+                if process.poll() is None:
+                    process.kill()
+
                 process.wait(timeout=CLEANUP_TIMEOUT)
-            except subprocess.TimeoutExpired:
+
+            except (OSError, subprocess.TimeoutExpired):
                 output["cleanup_warning"] = (
                     "Docker process termination could not be confirmed."
                 )
 
-            if process.stdout:
-                process.stdout.close()
-
-            if process.stderr:
-                process.stderr.close()
+            finally:
+                for stream in (
+                    process.stdout,
+                    process.stderr,
+                ):
+                    if stream is not None:
+                        try:
+                            stream.close()
+                        except OSError:
+                            output["cleanup_warning"] = (
+                                "Docker process stream cleanup failed."
+                            )
 
         try:
             cleanup = subprocess.run(
-                [docker_path, "rm", "-f", container_name],
+                [
+                    docker_path,
+                    "rm",
+                    "-f",
+                    container_name,
+                ],
                 capture_output=True,
                 text=True,
                 timeout=CLEANUP_TIMEOUT,
@@ -168,3 +202,4 @@ def run_python_code(code: str) -> dict:
             )
 
     return output
+
